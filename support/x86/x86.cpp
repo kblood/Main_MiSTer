@@ -39,6 +39,7 @@
 #include "../../shmem.h"
 #include "../../ide.h"
 #include "x86_share.h"
+#include "x86_fpu_trace.h"
 
 #define FDD0_BASE   0xF200
 #define FDD1_BASE   0xF300
@@ -761,6 +762,7 @@ static void fdd_io(uint8_t read)
 void x86_poll(int only_ide)
 {
 	if(!only_ide) x86_share_poll();
+	if(!only_ide) x86_fpu_trace_drain();
 
 	uint16_t sd_req = ide_check();
 	if (sd_req)
