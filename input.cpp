@@ -4123,6 +4123,29 @@ void make_unique(uint16_t vid, uint16_t pid, int type)
 	}
 }
 
+// Minimig "Second mouse (port 2)" OSD toggle (see input.h). Session-only,
+// defaults OFF so stock single-merged-mouse behavior is the default.
+int minimig_2nd_mouse = 0;
+
+// Whether the active core wants a second physical mouse split out onto port 2
+// (a real port-2 mouse on Minimig, a synthesized COM serial mouse on ao486,
+// etc.). Default OFF: when this returns 0, every mouse is left at port 0 and
+// merged into the single system mouse - i.e. extra mice all act as the main
+// mouse, exactly as on stock MiSTer. The 2nd-mouse behavior is strictly opt-in,
+// controlled by an in-core OSD option (never globally), so it can be turned on
+// and off at runtime for just the core that wants it.
+static int mouse2_split_enabled()
+{
+	// ao486 exposes a "2nd Mouse Port" OSD selector (Off/COM1..COM4) in
+	// status[62:60]; Off (0) means no second mouse.
+	if (is_x86()) return user_io_status_get("[62:60]") != 0;
+
+	// Minimig exposes a "Second mouse (port 2)" toggle in its OSD main menu.
+	if (is_minimig()) return minimig_2nd_mouse;
+
+	return 0;
+}
+
 void mergedevs()
 {
 	for (int i = 0; i < NUMDEV; i++)
@@ -4280,24 +4303,35 @@ void mergedevs()
 	}
 
 	// dual-mouse: assign each physical pointer mouse a port by enumeration order
-	// (1st mouse -> PS/2/port 1, 2nd -> COM3 serial mouse/port 2). Pure USB mice
+	// (1st mouse -> PS/2/port 1, 2nd -> COM serial mouse/port 2). Pure USB mice
 	// never get a joystick player number, so we track the port separately on the
-	// bound base (eventN) device that motion/buttons resolve to. A single mouse
-	// stays port 1, preserving today's behavior.
-	int mouse_order = 0;
+	// bound base (eventN) device that motion/buttons resolve to.
+	//
+	// OPT-IN, default OFF: unless the active core has explicitly enabled the
+	// 2nd-mouse split, every mouse stays at port 0 (-> merged into the single
+	// system mouse), which is the stock behavior - additional mice all act as
+	// the main mouse and never get diverted to port 2. The split is enabled by:
+	//   - ao486: the "2nd Mouse Port" OSD option (status[62:60] != Off);
+	//   - any other core (e.g. Minimig): MOUSE2_ENABLED=1 in MiSTer.ini, which
+	//     can be scoped to a core via a [<core>] section.
 	for (int i = 0; i < NUMDEV; i++) input[i].mouse_port = 0;
-	for (int i = 0; i < NUMDEV; i++)
+	if (mouse2_split_enabled())
 	{
-		if (input[i].mouse && input[i].quirk != QUIRK_MSSP)
+		int mouse_order = 0;
+		for (int i = 0; i < NUMDEV; i++)
 		{
-			int base = (input[i].bind >= 0) ? input[i].bind : i;
-			// Skip phantom mice exposed by keyboards (e.g. 8BitDo Retro Keyboard):
-			// they enumerate before real USB mice and would steal port 1, forcing
-			// both real mice onto port 2 (the serial mouse). Leave them at port 0
-			// (-> PS/2) so the real mice split cleanly across ports 1 and 2.
-			if (dev_is_keyboard(pool[base].fd)) continue;
-			if (!input[base].mouse_port)
-				input[base].mouse_port = (++mouse_order >= 2) ? 2 : 1;
+			if (input[i].mouse && input[i].quirk != QUIRK_MSSP)
+			{
+				int base = (input[i].bind >= 0) ? input[i].bind : i;
+				// Skip phantom mice exposed by keyboards (e.g. 8BitDo Retro
+				// Keyboard): they enumerate before real USB mice and would steal
+				// port 1, forcing both real mice onto port 2 (the serial mouse).
+				// Leave them at port 0 (-> merged) so the real mice split cleanly
+				// across ports 1 and 2.
+				if (dev_is_keyboard(pool[base].fd)) continue;
+				if (!input[base].mouse_port)
+					input[base].mouse_port = (++mouse_order >= 2) ? 2 : 1;
+			}
 		}
 	}
 }

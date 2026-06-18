@@ -136,6 +136,11 @@ extern char joy_bnames[NUMBUTTONS][32];
 extern int  joy_bcount;
 extern uint8_t ps2_kbd_scan_set;
 
+// Minimig "Second mouse (port 2)" OSD toggle. Session-only: defaults OFF and is
+// reset whenever the core (re)starts, so the stock single-merged-mouse behavior
+// is always the default. Set from the Minimig main menu, read by mergedevs().
+extern int minimig_2nd_mouse;
+
 void parse_buttons();
 char *get_buttons(int type = 0);
 void set_ovr_buttons(char *s, int type);

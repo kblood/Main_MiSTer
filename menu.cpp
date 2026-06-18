@@ -5783,7 +5783,7 @@ void HandleUI(void)
 		/* minimig main menu                                              */
 		/******************************************************************/
 	case MENU_MINIMIG_MAIN1:
-		menumask = 0x1EF0;
+		menumask = 0x3DF0;
 		OsdSetTitle("Minimig", OSD_ARROW_RIGHT | OSD_ARROW_LEFT);
 		helptext_idx = HELPTEXT_MAIN;
 
@@ -5845,24 +5845,26 @@ void HandleUI(void)
 			strcpy(s,      " Joystick Swap:          ");
 			strcat(s, (minimig_config.autofire & 0x8) ? " ON" : "OFF");
 			MenuWrite(m++, s, menusub == 4, 0);
-			MenuWrite(m++),
+			strcpy(s,      " Second mouse (port 2):   ");
+			strcat(s, minimig_2nd_mouse ? " ON" : "OFF");
+			MenuWrite(m++, s, menusub == 5, 0);
 
-			MenuWrite(m++, " Drives                    \x16", menusub == 5, 0);
-			MenuWrite(m++, " System                    \x16", menusub == 6, 0);
-			MenuWrite(m++, " Audio & Video             \x16", menusub == 7, 0);
+			MenuWrite(m++, " Drives                    \x16", menusub == 6, 0);
+			MenuWrite(m++, " System                    \x16", menusub == 7, 0);
+			MenuWrite(m++, " Audio & Video             \x16", menusub == 8, 0);
 			if (spi_uio_cmd16(UIO_GET_OSDMASK, 0) & 1)
 			{
-				menumask |= 0x100;
-				MenuWrite(m++, " MT32-pi                   \x16", menusub == 8);
+				menumask |= 0x200;
+				MenuWrite(m++, " MT32-pi                   \x16", menusub == 9);
 			}
 
 			MenuWrite(m++);
-			MenuWrite(m++, " Save configuration        \x16", menusub == 9, 0);
-			MenuWrite(m++, " Load configuration        \x16", menusub == 10, 0);
+			MenuWrite(m++, " Save configuration        \x16", menusub == 10, 0);
+			MenuWrite(m++, " Load configuration        \x16", menusub == 11, 0);
 
 			while (m < 14) MenuWrite(m++);
-			MenuWrite(m++, " Reset", menusub == 11, 0);
-			MenuWrite(m, STD_EXIT, menusub == 12, 0);
+			MenuWrite(m++, " Reset", menusub == 12, 0);
+			MenuWrite(m, STD_EXIT, menusub == 13, 0);
 
 			if (!adjvisible) break;
 			firstmenu += adjvisible;
@@ -5925,44 +5927,51 @@ void HandleUI(void)
 				minimig_ConfigAutofire(minimig_config.autofire, 0x8);
 				menustate = MENU_MINIMIG_MAIN1;
 			}
+			else if (menusub == 5)
+			{
+				// Second mouse (port 2): userspace-only input routing toggle,
+				// no FPGA command. Session-only (resets OFF on core restart).
+				minimig_2nd_mouse ^= 1;
+				menustate = MENU_MINIMIG_MAIN1;
+			}
 			else if (select)
 			{
-				if (menusub == 5)
+				if (menusub == 6)
 				{
 					menustate = MENU_MINIMIG_DISK1;
 					menusub = 0;
 				}
-				else if (menusub == 6)
+				else if (menusub == 7)
 				{
 					menustate = MENU_MINIMIG_CHIPSET1;
 					menusub = 0;
 				}
-				else if (menusub == 7)
+				else if (menusub == 8)
 				{
 					menustate = MENU_MINIMIG_VIDEO1;
 					menusub = 0;
 				}
-				else if (menusub == 8)
+				else if (menusub == 9)
 				{
 					menusub = 0;
 					menustate = MENU_MT32PI_MAIN1;
 				}
-				else if (menusub == 9)
+				else if (menusub == 10)
 				{
 					menusub = 0;
 					menustate = MENU_MINIMIG_SAVECONFIG1;
 				}
-				else if (menusub == 10)
+				else if (menusub == 11)
 				{
 					menusub = 0;
 					menustate = MENU_MINIMIG_LOADCONFIG1;
 				}
-				else if (menusub == 11)
+				else if (menusub == 12)
 				{
 					menustate = MENU_NONE1;
 					minimig_reset();
 				}
-				else if (menusub == 12)
+				else if (menusub == 13)
 				{
 					menustate = MENU_NONE1;
 				}
