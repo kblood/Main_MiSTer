@@ -162,6 +162,13 @@ void ide_set_regs(ide_config *ide)
 {
 	if (!(ide->regs.status & (ATA_STATUS_BSY | ATA_STATUS_ERR))) ide->regs.status |= ATA_STATUS_DSC;
 
+	// For ATAPI (packet) devices, status bit 4 is the SERVICE bit, not DSC. We never run
+	// overlapped commands, so SERVICE must read 0. Force it low for CD drives, matching 86Box
+	// ide_status() which masks DSC out of every ATAPI status read (hdc_ide.c). Win9x ESDI_506
+	// otherwise reads the permanent bit-4 as "overlapped-command SERVICE pending", rejects the
+	// channel, and the device fails to start (Device Manager Code 10).
+	if (ide->drive[ide->regs.drv].cd) ide->regs.status &= ~ATA_STATUS_DSC;
+
 	uint8_t data[12] =
 	{
 		(uint8_t)((ide->drive[ide->regs.drv].cd) ? 0x80 : ide->regs.io_size),
@@ -1042,7 +1049,10 @@ void ide_io(int num, int req)
 
 		ide_get_regs(ide);
 		ide->regs.head = 0;
-		ide->regs.error = 0;
+		// ATAPI devices must post diagnostic code 01h ("device passed, no device 1") in the
+		// error register after a bus reset; an ATA HDD posts 0. Leaving a stale ABRT here made
+		// Win9x's ESDI_506 read the CD as having failed its power-on self-test.
+		ide->regs.error = ide->drive[ide->regs.drv].cd ? 1 : 0;
 		ide->regs.sector = 1;
 		ide->regs.sector_count = 1;
 		ide->regs.cylinder = (!ide->drive[ide->regs.drv].present) ? 0xFFFF : ide->drive[ide->regs.drv].cd ? 0xEB14 : 0x0000;

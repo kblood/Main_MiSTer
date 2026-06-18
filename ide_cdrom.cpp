@@ -1540,6 +1540,10 @@ int cdrom_handle_cmd(ide_config *ide)
 		drv = ide->regs.drv;
 		memset(&ide->regs, 0, sizeof(ide->regs));
 		ide->regs.drv = drv;
+		// ATAPI interrupt reason (Sector Count) must read "data-to-host" (I/O=1, C/D=0 = 2)
+		// at the IRQ that signals the 512-byte IDENTIFY PACKET data is ready. The memset left
+		// it 0, an invalid interrupt reason that Win9x's ESDI_506 rejects as a bad IRQ.
+		ide->regs.sector_count = 2;
 		ide->regs.pkt_io_size = 256;
 		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_DRQ | ATA_STATUS_IRQ | ATA_STATUS_END;
 		ide_set_regs(ide);
@@ -1579,16 +1583,22 @@ int cdrom_handle_cmd(ide_config *ide)
 		ide->regs.sector_count = 1;
 		ide->regs.cylinder = 0xEB14;
 		ide->regs.head = 0;
+		// Post the ATAPI diagnostic code (01h = device passed, no device 1). The handler
+		// previously left whatever was in the error register (e.g. ABRT from a preceding
+		// 0xEC IDENTIFY), which Win9x's ESDI_506 reads as a failed self-test.
+		ide->regs.error = 1;
 		ide->regs.io_size = 0;
 		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_DSC;
 		ide_set_regs(ide);
 		break;
-	
+
 		case 0xEF: // set features
 		switch(ide->regs.features)
 		{
-			case 0x03:
-			dbg_printf("Ignoring Set Features Transfer Mode: %02x\n", ide->regs.features);
+			case 0x03: // set transfer mode
+			case 0x66: // disable reverting to power-on defaults
+			case 0xCC: // enable reverting to power-on defaults
+			dbg_printf("Ignoring Set Features: %02x\n", ide->regs.features);
 			ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_IRQ;
 			ide_set_regs(ide);
 			break;
