@@ -23,10 +23,27 @@ static void scheduler_wait_fpga_ready(void)
 	}
 }
 
+// TEMP iter-365 diag: confirm both cothreads are actually cycling (vs. one
+// getting stuck without ever calling scheduler_yield()). Remove once the S3
+// trace investigation is resolved.
+static void scheduler_diag_tick(int is_poll)
+{
+	static FILE *g_f = nullptr;
+	static uint32_t g_poll_n = 0, g_ui_n = 0;
+	if (!g_f) g_f = fopen("/tmp/ao486_s3sched.csv", "w");
+	uint32_t *n = is_poll ? &g_poll_n : &g_ui_n;
+	if (g_f && (*n < 5 || (*n % 200) == 0)) {
+		fprintf(g_f, "%s,%u,poll=%u,ui=%u\n", is_poll ? "poll-enter" : "ui-enter", *n, g_poll_n, g_ui_n);
+		fflush(g_f);
+	}
+	(*n)++;
+}
+
 static void scheduler_co_poll(void)
 {
 	for (;;)
 	{
+		scheduler_diag_tick(1);
 		scheduler_wait_fpga_ready();
 
 		{
@@ -45,6 +62,8 @@ static void scheduler_co_ui(void)
 {
 	for (;;)
 	{
+		scheduler_diag_tick(0);
+
 		{
 			SPIKE_SCOPE("co_ui", 1000);
 			HandleUI();

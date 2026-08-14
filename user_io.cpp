@@ -223,7 +223,10 @@ char is_menu()
 static int is_x86_type = 0;
 char is_x86()
 {
-	if (!is_x86_type) is_x86_type = strcasecmp(orig_name, "AO486") ? 2 : 1;
+	// iter-250: prefix-match so renamed ao486 variants (AO486FPU, AO486DBG, ...)
+	// still register as x86. Lets the FPU/debug core carry its own CONF_STR name
+	// -> its own [section] + main= firmware pin, decoupled from the shared [AO486].
+	if (!is_x86_type) is_x86_type = strncasecmp(orig_name, "AO486", 5) ? 2 : 1;
 	return (is_x86_type == 1);
 }
 
@@ -3092,6 +3095,22 @@ void user_io_poll()
 		PROFILE_FUNCTION();
 	#endif
 
+	// TEMP iter-365 diag: unconditional entry-point log, placed before ANY
+	// early return, to confirm user_io_poll() itself is being called and to
+	// see the raw core_type value. Remove once the S3 trace investigation
+	// is resolved.
+	{
+		static FILE *g_entrylog = nullptr;
+		static uint32_t g_entrycnt = 0;
+		if (!g_entrylog) g_entrylog = fopen("/tmp/ao486_s3entry.csv", "w");
+		if (g_entrylog && (g_entrycnt < 5 || (g_entrycnt % 500) == 0)) {
+			fprintf(g_entrylog, "%u,core_type=%d,SHARPMZ=%d,8BIT=%d\n",
+			        g_entrycnt, core_type, CORE_TYPE_SHARPMZ, CORE_TYPE_8BIT);
+			fflush(g_entrylog);
+		}
+		g_entrycnt++;
+	}
+
 	// every frame, check if a screenshot has been requested.
 	// this is reduce risk of screenshot occurring while the scaler
 	// is being updated and getting a corrupted image.
@@ -3144,6 +3163,18 @@ void user_io_poll()
 	}
 
 	// sd card emulation
+	{
+		// TEMP iter-365 diag: confirm is_x86()/orig_name gating for the S3
+		// trace investigation. Remove once resolved.
+		static FILE *g_gatelog = nullptr;
+		static uint32_t g_gatecnt = 0;
+		if (!g_gatelog) g_gatelog = fopen("/tmp/ao486_s3gate.csv", "w");
+		if (g_gatelog && (g_gatecnt++ % 100) == 0) {
+			fprintf(g_gatelog, "%u,is_x86=%d,is_pcxt=%d,orig_name=%s,core_name=%s\n",
+			        g_gatecnt, is_x86(), is_pcxt(), orig_name, core_name);
+			fflush(g_gatelog);
+		}
+	}
 	if (is_x86() || is_pcxt())
 	{
 		x86_poll(0);
@@ -4089,6 +4120,29 @@ void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w)
 		}
 		return;
 	}
+}
+
+// Second mouse for ao486, delivered to the core as a COM3 serial mouse
+// (UIO_MOUSE2 -> hps_io 0x07 -> serial_mouse generator -> UART3 RX). Only ao486
+// decodes this command; other cores ignore it. Emitted only when a 2nd physical
+// mouse is assigned to player 2 (see input.cpp mouse_port). Sends raw signed
+// deltas + buttons; the FPGA synthesizes the Microsoft 1200-baud serial frames.
+void user_io_mouse2(unsigned char b, int16_t x, int16_t y, int16_t w)
+{
+	(void)w;
+	if (osd_is_visible && !is_menu()) return;
+	if (!is_x86()) return;
+
+	register_activity();
+
+	int16_t cx = (x < -127) ? -127 : (x > 127) ? 127 : x;
+	int16_t cy = (y < -127) ? -127 : (y > 127) ? 127 : y;
+
+	spi_uio_cmd_cont(UIO_MOUSE2);
+	spi_w((uint8_t)cx);    // dx  -> hps_io byte_cnt 1 (io_din[7:0])
+	spi_w((uint8_t)cy);    // dy  -> hps_io byte_cnt 2
+	spi_w(b & 0x07);       // btn -> hps_io byte_cnt 3
+	DisableIO();
 }
 
 /* usb modifer bits:
