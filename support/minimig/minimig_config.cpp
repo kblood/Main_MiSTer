@@ -469,10 +469,12 @@ static void ApplyConfiguration(char reloadkickstart)
 		}
 		if (!uploaded && !UploadKickstart(minimig_config.kickstart))
 		{
-			snprintf(minimig_config.kickstart, sizeof(minimig_config.kickstart) - 1, "%s/%s", HomeDir(), "KICK.ROM");
+			char kick[sizeof(minimig_config.kickstart)];
+			snprintf(kick, sizeof(kick), "%s/%s", HomeDir(), "KICK.ROM");
+			minimig_set_kickstart(kick);
 			if (!UploadKickstart(minimig_config.kickstart))
 			{
-				strcpy(minimig_config.kickstart, "KICK.ROM");
+				minimig_set_kickstart("KICK.ROM");
 				if (!UploadKickstart(minimig_config.kickstart))
 				{
 					BootPrintEx("No Kickstart loaded. Press F12 for settings.");
