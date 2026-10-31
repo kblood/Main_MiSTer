@@ -299,7 +299,6 @@ static void akiko_send_response(const uint8_t *payload, int len)
 
 	int total = len + 1;
 
-	usleep(1000);
 
 	EnableIO();
 	spi8(UIO_DMA_WRITE);
