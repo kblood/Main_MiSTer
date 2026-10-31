@@ -95,6 +95,7 @@ static uint32_t cd_seek_ready_ms    = 0;
 typedef struct {
 	int32_t  base_lba;
 	uint32_t lru_tick;
+	int      ra_fill;
 	uint8_t  valid[AKIKO_PREFETCH_SECTORS];
 	uint8_t  buf[AKIKO_PREFETCH_SECTORS * AKIKO_SECTOR_BYTES];
 } prefetch_window_t;
@@ -298,6 +299,8 @@ static void akiko_send_response(const uint8_t *payload, int len)
 
 	int total = len + 1;
 
+	akiko_diag("[akiko] TX op=0x%02x len=%d status_before=0x%04x", out[0] & 0x0f, total, akiko_read_status());
+
 	EnableIO();
 	spi8(UIO_DMA_WRITE);
 	spi32_w(AKIKO_BRIDGE_ADDR);
@@ -306,7 +309,8 @@ static void akiko_send_response(const uint8_t *payload, int len)
 	}
 	DisableIO();
 
-	akiko_wait_status_bit(AKIKO_STATUS_RX_BUSY, true, 200);
+	bool rx_seen = akiko_wait_status_bit(AKIKO_STATUS_RX_BUSY, true, 200);
+	akiko_diag("[akiko] TX done rx_busy_seen=%d", rx_seen);
 
 #if AKIKO_CD32_DEBUG
 	akiko_dbg("TX %d bytes:", total);
@@ -1137,6 +1141,7 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 {
 	prefetch_window_t *w = &cd_prefetch_windows[win_idx];
 	w->base_lba = (int32_t)base_lba;
+	w->ra_fill = AKIKO_PREFETCH_SECTORS;
 	int filled = 0;
 	for (int i = 0; i < AKIKO_PREFETCH_SECTORS; i++) {
 		uint32_t lba = base_lba + i;
@@ -1152,8 +1157,39 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 	return filled;
 }
 
+#define AKIKO_READAHEAD_STEP 3
+
+static void akiko_prefetch_readahead(drive_t *drv, int cur)
+{
+	const uint32_t next_base = (uint32_t)cd_prefetch_windows[cur].base_lba + AKIKO_PREFETCH_SECTORS;
+	int nw = akiko_prefetch_find(next_base);
+	if (nw < 0) {
+		int pick = -1;
+		for (int i = 0; i < AKIKO_PREFETCH_WINDOWS; i++) {
+			if (i == cur) continue;
+			if (cd_prefetch_windows[i].base_lba < 0) { pick = i; break; }
+			if (pick < 0 || cd_prefetch_windows[i].lru_tick < cd_prefetch_windows[pick].lru_tick) pick = i;
+		}
+		if (pick < 0) return;
+		prefetch_window_t *w = &cd_prefetch_windows[pick];
+		w->base_lba = (int32_t)next_base;
+		w->ra_fill = 0;
+		w->lru_tick = cd_prefetch_windows[cur].lru_tick;
+		memset(w->valid, 0, sizeof(w->valid));
+		nw = pick;
+	}
+	prefetch_window_t *w = &cd_prefetch_windows[nw];
+	for (int n = 0; n < AKIKO_READAHEAD_STEP && w->ra_fill < AKIKO_PREFETCH_SECTORS; n++, w->ra_fill++) {
+		uint8_t *slot = &w->buf[w->ra_fill * AKIKO_SECTOR_BYTES];
+		w->valid[w->ra_fill] = (cdrom_read_raw_sector(drv, next_base + w->ra_fill, slot) == 0);
+	}
+}
+
 static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 {
+	static uint32_t last_lba = 0xFFFFFFFFu;
+	const bool sequential = (lba == last_lba + 1);
+	last_lba = lba;
 	int win = akiko_prefetch_find(lba);
 	if (win < 0) {
 		cd_prefetch_misses++;
@@ -1182,6 +1218,7 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 		}
 	}
 	memcpy(out_buf, &w->buf[idx * AKIKO_SECTOR_BYTES], AKIKO_SECTOR_BYTES);
+	if (sequential) akiko_prefetch_readahead(drv, win);
 	return 0;
 }
 
@@ -1191,6 +1228,13 @@ static bool akiko_handle_sec_req(void)
 	static int64_t phase_a_us = 0, phase_b_us = 0, phase_c_us = 0;
 	static uint32_t bucket_count = 0;
 	const uint32_t BUCKET_SIZE = 256;
+
+	// Per-read trace state (see RD_LOG_BATCH flush below).
+	const uint32_t RD_LOG_BATCH = 64;
+	static char rd_buf[2048];
+	static int rd_len = 0;
+	static uint32_t rd_n = 0;
+	static uint32_t rd_gate_blocks = 0;
 
 	static uint32_t last_sec_req_ms = 0;
 	uint32_t now_ms = (uint32_t)GetTimer(0);
@@ -1288,10 +1332,23 @@ static bool akiko_handle_sec_req(void)
 	}
 	clock_gettime(CLOCK_MONOTONIC, &ts2);
 
-	if (!CheckTimer(cd_seek_ready_ms)) return false;
+	if (!CheckTimer(cd_seek_ready_ms)) {
+		rd_gate_blocks++;
+		return false;
+	}
 	cd_data_lba_last = cd_head_lba = (int32_t)lba;
 	akiko_push_sector(buf);
 	clock_gettime(CLOCK_MONOTONIC, &ts3);
+
+	// Per-read trace for MiSTer-vs-Copperline comparison. Buffered and flushed
+	// every RD_LOG_BATCH reads so the file write stays off the read path.
+	rd_len += snprintf(rd_buf + rd_len, sizeof(rd_buf) - rd_len, "%u@%u ", lba, now_ms);
+	if (++rd_n >= RD_LOG_BATCH || rd_len > (int)sizeof(rd_buf) - 64) {
+		akiko_diag("[akiko] RD n=%u gate_blocks=%u: %s", rd_n, rd_gate_blocks, rd_buf);
+		rd_len = rd_n = 0;
+		rd_gate_blocks = 0;
+		rd_buf[0] = '\0';
+	}
 
 	#define TS_DELTA_US(a, b) \
 		(((int64_t)(b).tv_sec  - (int64_t)(a).tv_sec ) * 1000000LL + \
@@ -1413,6 +1470,16 @@ static void akiko_diag(const char *fmt, ...)
 	va_end(ap);
 	putchar('\n');
 	fflush(stdout);
+
+	FILE *lf = fopen("/tmp/akiko_dbg.log", "a");
+	if (lf) {
+		fprintf(lf, "[%6lu.%06lu] ", (unsigned long)ts.tv_sec, (unsigned long)(ts.tv_nsec / 1000));
+		va_start(ap, fmt);
+		vfprintf(lf, fmt, ap);
+		va_end(ap);
+		fputc('\n', lf);
+		fclose(lf);
+	}
 }
 
 void akiko_cd32_poll(void)
@@ -1491,6 +1558,18 @@ void akiko_cd32_poll(void)
 	}
 #endif
 	const bool rx_idle = !(status & AKIKO_STATUS_RX_BUSY);
+
+	{
+		static uint32_t hb_ms = 0;
+		uint32_t hb_now = (uint32_t)GetTimer(0);
+		if (hb_now - hb_ms >= 1000) {
+			hb_ms = hb_now;
+			akiko_diag("[akiko] HB status=0x%04x base=%d head=%d last=%d seek_wait=%d paused=%d playing=%d speed=%d",
+			           status, cd_data_lba_base, cd_head_lba, cd_data_lba_last,
+			           (int32_t)(cd_seek_ready_ms - hb_now), cd_paused, cd_playing,
+			           (minimig_get_extcfg() >> 21) & 3);
+		}
+	}
 
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
@@ -1631,7 +1710,7 @@ void akiko_cd32_poll(void)
 		}
 	}
 
-	if (op != 0x05) {
+	{
 		char hex[3 * AKIKO_CMD_MAX + 1];
 		int  off = 0;
 		for (int i = 0; i < n && i < 16; i++) {
