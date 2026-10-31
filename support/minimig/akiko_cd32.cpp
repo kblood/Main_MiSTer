@@ -558,18 +558,34 @@ static void cmd_unpause(const uint8_t *cmd)
 
 static int cdrom_speed = 1;
 
-static uint32_t cd_seek_ms(int32_t lba, int speed)
+#define AKIKO_FAST_SEEK_DIV 16
+
+static uint32_t cd_drive_seek_ms(int32_t seek)
 {
 	static const int32_t d[] = { 0, 1000, 10000, 100000, 200000 }, f[] = { 19, 26, 44, 77, 102 };
-	int32_t seek = abs(cd_data_lba_last - lba);
-	if (speed) return ((seek < 100) ? 1 : (seek / 1000 + 10 > 100) ? 100 : seek / 1000 + 10) * 1000 / ((75 * cdrom_speed) << speed);
-
-	seek = abs(cd_head_lba - lba);
-	if (seek <= 2) return 1000 / (75 * cdrom_speed);
-
 	int i = 1;
 	while (i < 4 && seek > d[i]) i++;
 	return ((seek > d[4]) ? f[4] : f[i - 1] + (f[i] - f[i - 1]) * (seek - d[i - 1]) / (d[i] - d[i - 1])) * 1000 / 75;
+}
+
+static uint32_t cd_seek_ms(int32_t lba, int speed)
+{
+	int32_t head_seek = abs(cd_head_lba - lba);
+	if (!speed) {
+		if (head_seek <= 2) return 1000 / (75 * cdrom_speed);
+		return cd_drive_seek_ms(head_seek);
+	}
+
+	uint32_t ms = 0;
+	if (speed < 3) {
+		int32_t seek = abs(cd_data_lba_last - lba);
+		ms = ((seek < 100) ? 1 : (seek / 1000 + 10 > 100) ? 100 : seek / 1000 + 10) * 1000 / ((75 * cdrom_speed) << speed);
+	}
+	if (head_seek > 2) {
+		uint32_t floor_ms = cd_drive_seek_ms(head_seek) / AKIKO_FAST_SEEK_DIV;
+		if (floor_ms > ms) ms = floor_ms;
+	}
+	return ms;
 }
 
 static void cmd_multi(const uint8_t *cmd)
@@ -627,7 +643,7 @@ static void cmd_multi(const uint8_t *cmd)
 		cd_sec_cnt_high  = 0;
 		r[1] = 0x02;
 		int speed = (minimig_get_extcfg() >> 21) & 3;
-		cd_seek_ready_ms = (speed == 3) ? 0 : (uint32_t)GetTimer(cd_seek_ms((int32_t)s_lba, speed));
+		cd_seek_ready_ms = (uint32_t)GetTimer(cd_seek_ms((int32_t)s_lba, speed));
 		akiko_diag("[akiko] PLAY DATA arm: start_lba=%d end_lba=%d (cmd7=0x%02x)", (int32_t)s_lba, e_pos, cmd[7]);
 	} else if (seek_negative) {
 		cd_data_lba_base = -1;
