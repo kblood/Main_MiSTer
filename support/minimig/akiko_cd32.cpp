@@ -95,6 +95,7 @@ static uint32_t cd_seek_ready_ms    = 0;
 typedef struct {
 	int32_t  base_lba;
 	uint32_t lru_tick;
+	int      ra_fill;
 	uint8_t  valid[AKIKO_PREFETCH_SECTORS];
 	uint8_t  buf[AKIKO_PREFETCH_SECTORS * AKIKO_SECTOR_BYTES];
 } prefetch_window_t;
@@ -297,6 +298,8 @@ static void akiko_send_response(const uint8_t *payload, int len)
 	out[len] = (uint8_t)(0xff - (sum & 0xff));
 
 	int total = len + 1;
+
+	usleep(1000);
 
 	EnableIO();
 	spi8(UIO_DMA_WRITE);
@@ -1137,6 +1140,7 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 {
 	prefetch_window_t *w = &cd_prefetch_windows[win_idx];
 	w->base_lba = (int32_t)base_lba;
+	w->ra_fill = AKIKO_PREFETCH_SECTORS;
 	int filled = 0;
 	for (int i = 0; i < AKIKO_PREFETCH_SECTORS; i++) {
 		uint32_t lba = base_lba + i;
@@ -1152,8 +1156,39 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 	return filled;
 }
 
+#define AKIKO_READAHEAD_STEP 3
+
+static void akiko_prefetch_readahead(drive_t *drv, int cur)
+{
+	const uint32_t next_base = (uint32_t)cd_prefetch_windows[cur].base_lba + AKIKO_PREFETCH_SECTORS;
+	int nw = akiko_prefetch_find(next_base);
+	if (nw < 0) {
+		int pick = -1;
+		for (int i = 0; i < AKIKO_PREFETCH_WINDOWS; i++) {
+			if (i == cur) continue;
+			if (cd_prefetch_windows[i].base_lba < 0) { pick = i; break; }
+			if (pick < 0 || cd_prefetch_windows[i].lru_tick < cd_prefetch_windows[pick].lru_tick) pick = i;
+		}
+		if (pick < 0) return;
+		prefetch_window_t *w = &cd_prefetch_windows[pick];
+		w->base_lba = (int32_t)next_base;
+		w->ra_fill = 0;
+		w->lru_tick = cd_prefetch_windows[cur].lru_tick;
+		memset(w->valid, 0, sizeof(w->valid));
+		nw = pick;
+	}
+	prefetch_window_t *w = &cd_prefetch_windows[nw];
+	for (int n = 0; n < AKIKO_READAHEAD_STEP && w->ra_fill < AKIKO_PREFETCH_SECTORS; n++, w->ra_fill++) {
+		uint8_t *slot = &w->buf[w->ra_fill * AKIKO_SECTOR_BYTES];
+		w->valid[w->ra_fill] = (cdrom_read_raw_sector(drv, next_base + w->ra_fill, slot) == 0);
+	}
+}
+
 static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 {
+	static uint32_t last_lba = 0xFFFFFFFFu;
+	const bool sequential = (lba == last_lba + 1);
+	last_lba = lba;
 	int win = akiko_prefetch_find(lba);
 	if (win < 0) {
 		cd_prefetch_misses++;
@@ -1182,6 +1217,7 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 		}
 	}
 	memcpy(out_buf, &w->buf[idx * AKIKO_SECTOR_BYTES], AKIKO_SECTOR_BYTES);
+	if (sequential) akiko_prefetch_readahead(drv, win);
 	return 0;
 }
 
