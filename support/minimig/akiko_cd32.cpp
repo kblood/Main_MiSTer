@@ -187,6 +187,12 @@ static uint64_t toc_push_last_us    = 0;
 static bool     toc_dump_tail       = false;
 static uint64_t cmd_hold_until_us   = 0;
 
+#define AKIKO_SPIN_UP_COLD_US 8800000
+#define AKIKO_SPIN_UP_WARM_US 3500000
+static uint64_t cd_spin_disc        = 0;
+static uint32_t cd_spin_owed_us     = 0;
+static uint64_t cd_spin_ready_us    = 0;
+
 static char cd_save_path_active[256] = {0};
 static bool cd_save_load_pending     = false;
 static bool cd_save_dirty_observed   = false;
@@ -260,6 +266,19 @@ static uint64_t akiko_now_us(void)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static void akiko_spin_up(uint64_t now_us)
+{
+	if (!cd_spin_owed_us) return;
+	cd_spin_ready_us = now_us + cd_spin_owed_us;
+	cd_spin_owed_us  = 0;
+	akiko_diag("[akiko] spin-up: lead-in readable in %u ms", (unsigned)((cd_spin_ready_us - now_us) / 1000));
+}
+
+static bool akiko_spinning(uint64_t now_us)
+{
+	return now_us < cd_spin_ready_us && !((minimig_get_extcfg() >> 21) & 3);
 }
 
 static void akiko_cdda_flush(void)
@@ -1302,6 +1321,13 @@ void akiko_cd32_set_cd_path(const char *path)
 {
 	cd_media_event = true;
 
+	const uint64_t disc = (path && *path) ? fnv1a_64(path) : 0;
+	if (disc != cd_spin_disc) {
+		cd_spin_disc     = disc;
+		cd_spin_owed_us  = !disc ? 0 : (cd_initialized < 2) ? AKIKO_SPIN_UP_COLD_US : AKIKO_SPIN_UP_WARM_US;
+		cd_spin_ready_us = 0;
+	}
+
 	char new_path[256] = {0};
 	if (path && *path) {
 		compute_save_path(path, new_path, sizeof(new_path));
@@ -1455,6 +1481,7 @@ void akiko_cd32_poll(void)
 		cd_media_push_pending = true;
 		if (swap) cd_media_swap_absent = true;
 		if (level == CD_MEDIA_PRESENT) akiko_build_toc();
+		if (level == CD_MEDIA_PRESENT && !swap) akiko_spin_up(akiko_now_us());
 		akiko_diag("[akiko] media level -> %s (cd_init=%u, announce pending)",
 		           (level == CD_MEDIA_PRESENT) ? "present" : "absent",
 		           cd_initialized);
@@ -1560,6 +1587,7 @@ void akiko_cd32_poll(void)
 		akiko_send_response(r, 2);
 		cd_media_push_pending = false;
 		akiko_build_toc();
+		if (cd_media_present()) akiko_spin_up(now_us);
 		akiko_diag("[akiko] media-status push: opcode=0x0a status=0x%02x", r[1]);
 		return;
 	}
@@ -1616,7 +1644,7 @@ void akiko_cd32_poll(void)
 		}
 	}
 
-	if (cd_initialized == 2 && toc_push_idx >= 0 && rx_idle
+	if (cd_initialized == 2 && toc_push_idx >= 0 && rx_idle && !akiko_spinning(now_us)
 	    && (now_us - toc_push_last_us) >= AKIKO_TOC_PUSH_PERIOD_US) {
 		toc_push_last_us = now_us;
 		akiko_push_toc_entry();
