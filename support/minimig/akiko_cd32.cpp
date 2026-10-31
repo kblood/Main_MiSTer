@@ -1164,13 +1164,18 @@ static bool akiko_cdda_pump(void)
 	return true;
 }
 
-static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
+#define AKIKO_FIRST_FILL_SECTORS 8
+
+static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba, int first)
 {
 	prefetch_window_t *w = &cd_prefetch_windows[win_idx];
 	w->base_lba = (int32_t)base_lba;
-	w->ra_fill = AKIKO_PREFETCH_SECTORS;
+	memset(w->valid, 0, sizeof(w->valid));
+	int last = first + AKIKO_FIRST_FILL_SECTORS;
+	if (last > AKIKO_PREFETCH_SECTORS) last = AKIKO_PREFETCH_SECTORS;
+	w->ra_fill = last;
 	int filled = 0;
-	for (int i = 0; i < AKIKO_PREFETCH_SECTORS; i++) {
+	for (int i = first; i < last; i++) {
 		uint32_t lba = base_lba + i;
 		uint8_t *slot = &w->buf[i * AKIKO_SECTOR_BYTES];
 		if (cdrom_read_raw_sector(drv, lba, slot) == 0) {
@@ -1185,6 +1190,14 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 }
 
 #define AKIKO_READAHEAD_STEP 3
+
+static void akiko_prefetch_extend(drive_t *drv, prefetch_window_t *w)
+{
+	for (int n = 0; n < AKIKO_READAHEAD_STEP && w->ra_fill < AKIKO_PREFETCH_SECTORS; n++, w->ra_fill++) {
+		uint8_t *slot = &w->buf[w->ra_fill * AKIKO_SECTOR_BYTES];
+		w->valid[w->ra_fill] = (cdrom_read_raw_sector(drv, (uint32_t)w->base_lba + w->ra_fill, slot) == 0);
+	}
+}
 
 static void akiko_prefetch_readahead(drive_t *drv, int cur)
 {
@@ -1205,11 +1218,7 @@ static void akiko_prefetch_readahead(drive_t *drv, int cur)
 		memset(w->valid, 0, sizeof(w->valid));
 		nw = pick;
 	}
-	prefetch_window_t *w = &cd_prefetch_windows[nw];
-	for (int n = 0; n < AKIKO_READAHEAD_STEP && w->ra_fill < AKIKO_PREFETCH_SECTORS; n++, w->ra_fill++) {
-		uint8_t *slot = &w->buf[w->ra_fill * AKIKO_SECTOR_BYTES];
-		w->valid[w->ra_fill] = (cdrom_read_raw_sector(drv, next_base + w->ra_fill, slot) == 0);
-	}
+	akiko_prefetch_extend(drv, &cd_prefetch_windows[nw]);
 }
 
 static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
@@ -1222,7 +1231,7 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 		cd_prefetch_misses++;
 		win = akiko_prefetch_pick_evict();
 		uint32_t base = (lba / AKIKO_PREFETCH_SECTORS) * AKIKO_PREFETCH_SECTORS;
-		if (akiko_prefetch_fill(drv, win, base) == 0) {
+		if (akiko_prefetch_fill(drv, win, base, (int)(lba - base)) == 0) {
 			akiko_diag("[akiko] prefetch fill TOTAL FAIL win=%d base=%u (req lba=%u)",
 			           win, base, lba);
 			return -1;
@@ -1245,7 +1254,8 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 		}
 	}
 	memcpy(out_buf, &w->buf[idx * AKIKO_SECTOR_BYTES], AKIKO_SECTOR_BYTES);
-	if (sequential) akiko_prefetch_readahead(drv, win);
+	if (w->ra_fill < AKIKO_PREFETCH_SECTORS) akiko_prefetch_extend(drv, w);
+	else if (sequential) akiko_prefetch_readahead(drv, win);
 	return 0;
 }
 
